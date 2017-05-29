@@ -25,6 +25,11 @@
 // Includes for raw input
 #include <termios.h>
 
+// Commit changes:
+//  #1:
+//   - Prevented possible buffer overflow by implementing a dynamic parse_json buffer size (not fixed to 2048 bytes anymore)
+//   - Everything now returns instead exiting on critical errors to properly free memory
+
 // TODO:
 // * make framebuffer viewer text independent of terminal text to remove uglyness (use memory fonts)
 // * add jpeg support (only used in comics 1 to 119)
@@ -55,21 +60,34 @@ char* memapp(char* src, size_t src_size, char* dest, size_t dest_offset, size_t 
         dest = realloc(dest, dest_offset + src_size + dest_padding);
     if(dest == NULL) {
         fprintf(stderr, "malloc/realloc@memapp: Out of memory!\n");
-        exit(EXIT_FAILURE);
+        return NULL;
     }
     memcpy(&(dest[dest_offset]), src, src_size);
     return dest;
 }
 
-void set_string(struct mem_block* str, char* data, size_t len) {
+int set_string(struct mem_block* str, char* data, size_t len) {
     str->ptr = memapp(data, len, str->ptr, 0, 1);
-    str->i = len - 1;
+    if(str->ptr == NULL) {
+        str->i = 0;
+        return 0;
+    }
+    else {
+        str->i = len - 1;
+        return 1;
+    }
 }
 
 size_t write_callback_curl(char* buf, size_t size, size_t nmemb, struct mem_block* mem) {
     mem->ptr = memapp(buf, size * nmemb, mem->ptr, mem->i, 0);
-    mem->i += size * nmemb;
-    return size * nmemb;
+    if(mem->ptr == NULL) {
+        mem->i = 0;
+        return (size * nmemb) + 1; // Anything != size * nmemb will tell curl that an error has occured. size * nmemb may be 0, so return (size * nmemb) + 1 instead of just 0
+    }
+    else {
+        mem->i += size * nmemb;
+        return size * nmemb;
+    }
 }
 
 void print_help() {
@@ -136,7 +154,16 @@ unsigned int str_to_uint(const char* str, int* error_flag) {
     return (unsigned int)res;
 }
 
-void parse_json(struct mem_block* raw, struct json_parsed* parsed, int debug) {
+int parse_json(struct mem_block* raw, struct json_parsed* parsed, int debug) {
+    size_t buf_n = 0; // Current pos in buffer
+    size_t buf_len = 32; // Current buffer length (starts with 32 bytes, doubles when needed)
+    char* buffer = malloc(buf_len); // Dynamic buffer for storing current thing to parse
+
+    if(buffer == NULL) {
+        fprintf(stderr, "malloc@parse_json: Out of memory!\n");
+        return 0;
+    }
+
     parsed->month      = empty_mem;
     parsed->num        = empty_mem;
     parsed->link       = empty_mem;
@@ -148,10 +175,8 @@ void parse_json(struct mem_block* raw, struct json_parsed* parsed, int debug) {
     parsed->img        = empty_mem;
     parsed->title      = empty_mem;
     parsed->day        = empty_mem;
-
-    char buffer[2048]; // A pretty big buffer (2048 bytes)
-    size_t buf_n = 0;
     struct mem_block cur_key = empty_mem;
+
     // Booleans:
     // 0: Inside quote
     // 1: Escape next char
@@ -189,34 +214,46 @@ void parse_json(struct mem_block* raw, struct json_parsed* parsed, int debug) {
             else if(raw->ptr[n] == ':') {
                 set_bit(&modes, 2, 1);
                 buffer[buf_n++] = '\0';
-                set_string(&cur_key, buffer, buf_n);
+                if(!set_string(&cur_key, buffer, buf_n)) {
+                    free(buffer);
+                    return 0;
+                }
                 buf_n = 0;
             }
             else if(raw->ptr[n] == ',' || raw->ptr[n] == '}') {
                 set_bit(&modes, 2, 0);
                 buffer[buf_n++] = '\0';
+
+                struct mem_block* cur_mem_ptr = NULL;
                 if(strcmp(cur_key.ptr, "month") == 0)
-                    set_string(&parsed->month, buffer, buf_n);
+                    cur_mem_ptr = &parsed->month;
                 else if(strcmp(cur_key.ptr, "num") == 0)
-                    set_string(&parsed->num, buffer, buf_n);
+                    cur_mem_ptr = &parsed->num;
                 else if(strcmp(cur_key.ptr, "link") == 0)
-                    set_string(&parsed->link, buffer, buf_n);
+                    cur_mem_ptr = &parsed->link;
                 else if(strcmp(cur_key.ptr, "year") == 0)
-                    set_string(&parsed->year, buffer, buf_n);
+                    cur_mem_ptr = &parsed->year;
                 else if(strcmp(cur_key.ptr, "news") == 0)
-                    set_string(&parsed->news, buffer, buf_n);
+                    cur_mem_ptr = &parsed->news;
                 else if(strcmp(cur_key.ptr, "safe_title") == 0)
-                    set_string(&parsed->safe_title, buffer, buf_n);
+                    cur_mem_ptr = &parsed->safe_title;
                 else if(strcmp(cur_key.ptr, "transcript") == 0)
-                    set_string(&parsed->transcript, buffer, buf_n);
+                    cur_mem_ptr = &parsed->transcript;
                 else if(strcmp(cur_key.ptr, "alt") == 0)
-                    set_string(&parsed->alt, buffer, buf_n);
+                    cur_mem_ptr = &parsed->alt;
                 else if(strcmp(cur_key.ptr, "img") == 0)
-                    set_string(&parsed->img, buffer, buf_n);
+                    cur_mem_ptr = &parsed->img;
                 else if(strcmp(cur_key.ptr, "title") == 0)
-                    set_string(&parsed->title, buffer, buf_n);
+                    cur_mem_ptr = &parsed->title;
                 else if(strcmp(cur_key.ptr, "day") == 0)
-                    set_string(&parsed->day, buffer, buf_n);
+                    cur_mem_ptr = &parsed->day;
+                if(cur_mem_ptr != NULL) {
+                    if(!set_string(cur_mem_ptr, buffer, buf_n)) {
+                        free(cur_key.ptr);
+                        free(buffer);
+                        return 0;
+                    }
+                }
                 else if(debug)
                     fprintf(stderr, "@parse_json: Unknown json key (%s)! Ignoring\n", buffer);
                 buf_n = 0;
@@ -226,8 +263,20 @@ void parse_json(struct mem_block* raw, struct json_parsed* parsed, int debug) {
             else if(raw->ptr[n] != ' ' && debug)
                 fprintf(stderr, "@parse_json: Unknown char (%c)! Ignoring\n", raw->ptr[n]);
         }
+
+        if(buf_n == (buf_len - 1)) { // Expand buffer by x2 if it reaches limit length
+            buf_len *= 2;
+            buffer = realloc(buffer, buf_len);
+            if(buffer == NULL) {
+                fprintf(stderr, "realloc@parse_json: Out of memory!\n");
+                free(cur_key.ptr);
+                return 0;
+            }
+        }
     }
     free(cur_key.ptr);
+    free(buffer);
+    return 1;
 }
 
 void read_callback_png(png_structp png_ptr, png_bytep out_data, png_uint_32 size) {
@@ -633,85 +682,88 @@ int main(const int argc, const char* argv[]) {
         if(http_status == 200 && err == CURLE_OK) {
             if(json_raw.i > 0 && json_raw.ptr[0] == '{') {
                 struct json_parsed json_parsed;
-                parse_json(&json_raw, &json_parsed, get_bit(switches, 0));
+                if(parse_json(&json_raw, &json_parsed, get_bit(switches, 0))) {
+                    // Print comic number (must be done)
+                    printf("%s\n", json_parsed.num.ptr);
 
-                // Print comic number (must be done)
-                printf("%s\n", json_parsed.num.ptr);
+                    if(get_bit(switches, 1)) {  // Date
+                        printf("%s/%s/%s\n", (json_parsed.day.i == 0) ? "?" : json_parsed.day.ptr
+                                           , (json_parsed.month.i == 0) ? "?" : json_parsed.month.ptr
+                                           , (json_parsed.year.i == 0) ? "?" : json_parsed.year.ptr);
+                    }
 
-                if(get_bit(switches, 1)) {  // Date
-                    if(json_parsed.day.i == 0)
-                        set_string(&json_parsed.day, "?", 1);
-                    if(json_parsed.month.i == 0)
-                        set_string(&json_parsed.month, "?", 1);
-                    if(json_parsed.year.i == 0)
-                        set_string(&json_parsed.year, "?", 1);
-                    printf("%s/%s/%s\n", json_parsed.day.ptr, json_parsed.month.ptr, json_parsed.year.ptr);
-                }
+                    if(get_bit(switches, 7)) {
+                        if(get_bit(switches, 2))// Safe-title
+                            printf("%s:\n\n", json_parsed.safe_title.ptr);
+                        else                    // Title
+                            printf("%s:\n\n", json_parsed.title.ptr);
+                    }
 
-                if(get_bit(switches, 7)) {
-                    if(get_bit(switches, 2))// Safe-title
-                        printf("%s:\n\n", json_parsed.safe_title.ptr);
-                    else                    // Title
-                        printf("%s:\n\n", json_parsed.title.ptr);
-                }
+                    // Transcript
+                    if(get_bit(switches, 6))
+                        printf("%s\n\n", json_parsed.transcript.ptr);
 
-                // Transcript
-                if(get_bit(switches, 6))
-                    printf("%s\n\n", json_parsed.transcript.ptr);
+                    if(get_bit(switches, 3))    // Alt text
+                        printf("%s\n\n", json_parsed.alt.ptr);
 
-                if(get_bit(switches, 3))    // Alt text
-                    printf("%s\n\n", json_parsed.alt.ptr);
+                    if(get_bit(switches, 4))    // Comic strip image link
+                        printf("%s\n", json_parsed.img.ptr);
 
-                if(get_bit(switches, 4))    // Comic strip image link
-                    printf("%s\n", json_parsed.img.ptr);
+                    if(get_bit(switches, 5)) {  // Display comic strip to framebuffer
+                        // Reset handle props
+                        curl_easy_reset(curl_handle);
 
-                if(get_bit(switches, 5)) {  // Display comic strip to framebuffer
-                    // Reset handle props
-                    curl_easy_reset(curl_handle);
+                        // Set up variables
+                        struct mem_block png_buffer = empty_mem;
 
-                    // Set up variables
-                    struct mem_block png_buffer = empty_mem;
+                        // Configure curl to download comic strip
+                        curl_easy_setopt(curl_handle, CURLOPT_URL, json_parsed.img.ptr);
+                        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback_curl);
+                        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &png_buffer);
+                        if(get_bit(switches, 0))
+                            curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 1L);
 
-                    // Configure curl to download comic strip
-                    curl_easy_setopt(curl_handle, CURLOPT_URL, json_parsed.img.ptr);
-                    curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback_curl);
-                    curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &png_buffer);
-                    if(get_bit(switches, 0))
-                        curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 1L);
+                        // Perform curl action
+                        err = curl_easy_perform(curl_handle);
+                        curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_status);
 
-                    // Perform curl action
-                    err = curl_easy_perform(curl_handle);
-                    curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_status);
+                        // Check if everything went OK
+                        if(http_status == 200 && err == CURLE_OK) {
+                            // Prepare data for reading PNG retreived
+                            // Note: All vars are only initialized on load_png(), now its UB
+                            png_uint_32 width = 0;
+                            png_uint_32 height = 0;
+                            png_bytepp pixel_buffer = NULL;
 
-                    // Check if everything went OK
-                    if(http_status == 200 && err == CURLE_OK) {
-                        // Prepare data for reading PNG retreived
-                        // Note: All vars are only initialized on load_png(), now its UB
-                        png_uint_32 width = 0;
-                        png_uint_32 height = 0;
-                        png_bytepp pixel_buffer = NULL;
+                            // Load png from memory
+                            pixel_buffer = load_png(png_buffer.ptr, png_buffer.i, &width, &height, get_bit(switches, 0));
 
-                        // Load png from memory
-                        pixel_buffer = load_png(png_buffer.ptr, png_buffer.i, &width, &height, get_bit(switches, 0));
+                            // Draw comic strip from pixel buffer to framebuffer
+                            if(pixel_buffer != NULL) {
+                                if(!draw_to_fb(pixel_buffer, width, height))
+                                    exitcode = EXIT_FAILURE;
 
-                        // Draw comic strip from pixel buffer to framebuffer
-                        if(pixel_buffer != NULL) {
-                            if(!draw_to_fb(pixel_buffer, width, height))
-                                exitcode = EXIT_FAILURE;
-
-                            // Free pixel buffer
-                            for(size_t n = 0; n < height; ++n)
-                                free(pixel_buffer[n]);
-                            free(pixel_buffer);
+                                // Free pixel buffer
+                                for(size_t n = 0; n < height; ++n)
+                                    free(pixel_buffer[n]);
+                                free(pixel_buffer);
+                            }
                         }
-                    }
-                    else {
-                        fprintf(stderr, "curl_easy_perform@main: Failed to retrieve comic strip image! HTTP status code: %li\n", http_status);
-                        exitcode = EXIT_FAILURE;
-                    }
+                        else {
+                            if(err == CURLE_WRITE_ERROR)
+                                fprintf(stderr, "curl_easy_perform@main: Failed to copy received data to memory!\n");
+                            else
+                                fprintf(stderr, "curl_easy_perform@main: Failed to retrieve comic strip image! HTTP status code: %li\n", http_status);
+                            exitcode = EXIT_FAILURE;
+                        }
 
-                    // Free png_buffer string
-                    free(png_buffer.ptr);
+                        // Free png_buffer string
+                        free(png_buffer.ptr);
+                    }
+                }
+                else {
+                    fprintf(stderr, "parse_json@main: Failed to parse JSON!");
+                    exitcode = EXIT_FAILURE;
                 }
 
                 // Free all strings
@@ -731,7 +783,9 @@ int main(const int argc, const char* argv[]) {
                 fprintf(stderr, "@main: JSON file doesn't start as a table!\n");
         }
         else {
-            if(comic != 0 && http_status == 404)
+            if(err == CURLE_WRITE_ERROR)
+                fprintf(stderr, "curl_easy_perform@main: Failed to copy received data to memory!\n");
+            else if(comic != 0 && http_status == 404)
                 fprintf(stderr, "Comic %lu doesn't exist!\n", comic);
             else
                 fprintf(stderr, "curl_easy_perform@main: Failed to retreive comic %lu! HTTP status code: %li\n", comic, http_status);
