@@ -4,6 +4,6 @@ To get program usage, use the -h or --help flag in the compiled program.
 
 It currently allows viewing the comic strip in a fbi-like viewer and getting comic info to stdout.
 
-Currently, the comics 1 to 119 are not supported, as they are in the JPEG format, and it's only meant to work on Linux (so don't complain if it doesn't work on Windows, OSX, etc). Support will be added in the future (as in, when I feel like it, or when someone does it for me).
+It's only meant to work on Linux (so don't complain if it doesn't work on Windows, OSX, etc). Support will be added in the future (as in, when I feel like it, or when someone does it for me).
 
-Depends on libcurl, libpng (and zlib) and, in the future, will depend on libjpeg.
+Depends on libcurl, libpng (and zlib) and libjpeg-turbo.
