@@ -23,7 +23,7 @@
 //   Image support:
 //   - Added a file extension check to know which image library to use
 //   - Added support for jpeg
-//   
+//
 //   Memory management:
 //   - After images are loaded, they are now converted into BGR bitmaps, instead of BGRA png rows, to save memory and to be JPEG compatible (framebuffer copying should now be slower due to this)
 //   - Memory operations now use void* as arguments
@@ -38,20 +38,40 @@
 //   Misc:
 //   - Re-organised some code
 //   - Separated code into different header files for better read-ability (possible todo: make source files for each header)
+//  ~~~~~
+//  #3:
+//   Argument handling:
+//   - Short switches can now be chained. E.g.: termkcd -fat                                                <- fatty fat, mmm...
+//   - Made comic printing optional (--comic/-c now toggles this, instead of specifying comic number)
+//   - Comic number is now specified as just a regular argument, instead of the -c switch. E.g.: termkcd -fat 1000 (no need for -c :D)
+//   - Errors when parsing arguments now print to stderr
+//
+//   Image viewer:
+//   - Framebuffer settings now restored on exit to prevent nasty things from happening
+//   - Image now can be properly moved up when help is hidden
+//
+//   Misc:
+//   - Minor code clean-up (removed some dead code)
+//   - Removed extra newlines between output
+//   - Overflow warning now prints to stderr
+//   - Updated help
+//   - Added missing newline in error message
 
 // TODO (* have high priority):
-// * Make comic number printing optional
-// * Make program arguments which are single-characters chain-able
+// * Add interactive mode (scroll through comics)
 // - Add sources for each header
 // - Turn everything into smaller functions
 // - Make code more DRY, by generalising functions (especially memory.h functions)
+// - ... basically do a major code cleanup!
 
-void print_help() {
-    printf("termkdc - A terminal utility for getting and parsing xkcd comics\n\n");
+void print_help(const char* bin_name) {
+    printf("termkdc - A terminal utility for getting xkcd comics\n\n");
     printf("Program arguments:\n");
+    printf("  %s [-hDcdtsTaif] <comic number>\n", bin_name);
+    printf("  <comic number> is optional and 0 (default value) indicates the latest comic\n\n");
     printf("  -h; --help               : Show this help screen\n");
     printf("  -D; --debug              : Show debug info\n");
-    printf("  -c <uint>; --comic <uint>: Comic number (0 = lastest comic; default)\n");
+    printf("  -c; --comic              : Show comic's number\n");
     printf("  -d; --date               : Show comic's publish date\n");
     printf("  -t; --title              : Show comic's title\n");
     printf("  -s; --safe-title         : Use safe title instead of regular title (innefective without -t)\n");
@@ -60,25 +80,18 @@ void print_help() {
     printf("  -i; --img                : Show comic's image link\n");
     printf("  -f; --framebuffer        : Render comic strip on framebuffer interactively (fbi-like viewer)\n\n");
     printf("Return values:\n");
-    printf("  EXIT_SUCCESS (%i) when no errors occur (warnings don't count as errors)\n", EXIT_SUCCESS);
-    printf("  EXIT_FAILURE (%i) when errors occur or when showing this screen involuntarily\n\n", EXIT_FAILURE);
-    printf("Guaranteed behaviour on successful exit:\n");
-    printf("  The program will always print the comic number first, then anything else.\n");
-    printf("  This is useful to keep track of the comics missed in a script. It cannot, however, be disabled.\n\n");
+    printf("  %i (EXIT_SUCCESS) when no errors occur (warnings don't count as errors)\n", EXIT_SUCCESS);
+    printf("  %i (EXIT_FAILURE) when errors occur or when showing this screen involuntarily\n\n", EXIT_FAILURE);
     printf("Example usage:\n");
-    printf("  termkcd -c 1000 -t -s -f\n");
-    printf("  Prints the safe version of the 1000th comic and views it in framebuffer\n");
-}
-
-int is_arg(const char* arg, const char* a, const char* b) {
-    return (strcmp(arg, a) == 0) || (strcmp(arg, b) == 0);
+    printf("  %s -tsf 1000\n", bin_name);
+    printf("  Prints the safe version of the 1000th comic's title and views it in framebuffer\n");
 }
 
 // Returns EXIT_SUCCESS for success and EXIT_FAILURE for fail
 // Will only fail on a parse error, memory error, connection failure or device open failure.
 int main(const int argc, const char* argv[]) {
     // Program argument switches
-    // 8-bit, 8 bools max. Bitmap order:
+    // 2*8-bit, 16 bools max. Bitmap order:
     // 0: Debug; -D, --debug
     // 1: Date; -d, --date
     // 2: Safe title; -s, --safe-title
@@ -87,55 +100,101 @@ int main(const int argc, const char* argv[]) {
     // 5: Framebuffer; -f, --framebuffer
     // 6: Transcript; -T, --transcript
     // 7: Title; -t, --title
-    char switches = 0;
+    // 8: Comic; -c, --comic
+    char switches[2] = {0, 0};
     unsigned long comic = 0;
     int exitcode = EXIT_SUCCESS;
 
     // Program argument parsing
     for(int n = 1; n < argc; ++n) {
         const char* this_arg = argv[n];
-        if(is_arg(this_arg, "-h", "--help")) {
-            print_help();
-            return EXIT_SUCCESS;
-        }
-        else if(is_arg(this_arg, "-D", "--debug"))
-            set_bit(&switches, 0, 1);
-        else if(is_arg(this_arg, "-c", "--comic")) {
-            if(++n == argc) {
-                printf("Missing value: --comic <uint>\n");
-                print_help();
+        size_t this_arg_len = strlen(this_arg);
+        if(this_arg[0] == '-') { // Argument is a switch
+            if(this_arg_len == 1) {
+                fprintf(stderr, "Invalid argument: switch is empty\n");
+                print_help(argv[0]);
                 return EXIT_FAILURE;
             }
-            else {
-                int errored = 0;
-                comic = str_to_uint(argv[n], &errored);
-                if(errored == 2) {
-                    printf("Invalid value: contains non-numerical characters\n");
-                    print_help();
+            else if(this_arg[1] == '-') { // Argument is a long-switch
+                if(strcmp(this_arg, "--help")) {
+                    print_help(argv[0]);
+                    return EXIT_SUCCESS;
+                }
+                else if(strcmp(this_arg, "--debug") == 0)
+                    set_bit(&switches[0], 0, 1);
+                else if(strcmp(this_arg, "--date") == 0)
+                    set_bit(&switches[0], 1, 1);
+                else if(strcmp(this_arg, "--safe-title") == 0)
+                    set_bit(&switches[0], 2, 1);
+                else if(strcmp(this_arg, "--alt") == 0)
+                    set_bit(&switches[0], 3, 1);
+                else if(strcmp(this_arg, "--img") == 0)
+                    set_bit(&switches[0], 4, 1);
+                else if(strcmp(this_arg, "--framebuffer") == 0)
+                    set_bit(&switches[0], 5, 1);
+                else if(strcmp(this_arg, "--transcript") == 0)
+                    set_bit(&switches[0], 6, 1);
+                else if(strcmp(this_arg, "--title") == 0)
+                    set_bit(&switches[0], 7, 1);
+                else if(strcmp(this_arg, "--comic") == 0)
+                    set_bit(&switches[1], 0, 1);
+                else {
+                    fprintf(stderr, "Unknown argument: %s\n", this_arg);
+                    print_help(argv[0]);
                     return EXIT_FAILURE;
                 }
-                else if(errored == 3)
-                    printf("Warning: Comic number overflowed. Max is %u\n", UINT_MAX);
+            }
+            else { // Argument is a chained or single short-switch
+                for(size_t i = 1; i < this_arg_len; ++i) {
+                    switch(this_arg[i]) {
+                    case 'h':
+                        print_help(argv[0]);
+                        return EXIT_SUCCESS;
+                    case 'D':
+                        set_bit(&switches[0], 0, 1);
+                        break;
+                    case 'd':
+                        set_bit(&switches[0], 1, 1);
+                        break;
+                    case 's':
+                        set_bit(&switches[0], 2, 1);
+                        break;
+                    case 'a':
+                        set_bit(&switches[0], 3, 1);
+                        break;
+                    case 'i':
+                        set_bit(&switches[0], 4, 1);
+                        break;
+                    case 'f':
+                        set_bit(&switches[0], 5, 1);
+                        break;
+                    case 'T':
+                        set_bit(&switches[0], 6, 1);
+                        break;
+                    case 't':
+                        set_bit(&switches[0], 7, 1);
+                        break;
+                    case 'c':
+                        set_bit(&switches[1], 0, 1);
+                        break;
+                    default:
+                        fprintf(stderr, "Unknown switch: -%c\n", this_arg[i]);
+                        print_help(argv[0]);
+                        return EXIT_FAILURE;
+                    }
+                }
             }
         }
-        else if(is_arg(this_arg, "-d", "--date"))
-            set_bit(&switches, 1, 1);
-        else if(is_arg(this_arg, "-s", "--safe-title"))
-            set_bit(&switches, 2, 1);
-        else if(is_arg(this_arg, "-a", "--alt"))
-            set_bit(&switches, 3, 1);
-        else if(is_arg(this_arg, "-i", "--img"))
-            set_bit(&switches, 4, 1);
-        else if(is_arg(this_arg, "-f", "--framebuffer"))
-            set_bit(&switches, 5, 1);
-        else if(is_arg(this_arg, "-T", "--transcript"))
-            set_bit(&switches, 6, 1);
-        else if(is_arg(this_arg, "-t", "--title"))
-            set_bit(&switches, 7, 1);
-        else {
-            printf("Unknown argument: %s\n", this_arg);
-            print_help();
-            return EXIT_FAILURE;
+        else { // Argument is something else (comic number?)
+            int errored = 0;
+            comic = str_to_uint(argv[n], &errored);
+            if(errored == 2) {
+                fprintf(stderr, "Invalid value: contains non-numerical characters\n");
+                print_help(argv[0]);
+                return EXIT_FAILURE;
+            }
+            else if(errored == 3)
+                fprintf(stderr, "Warning: Comic number overflowed. Max is %u\n", UINT_MAX);
         }
     }
 
@@ -153,41 +212,40 @@ int main(const int argc, const char* argv[]) {
         }
         curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback_curl);
         curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &json_raw);
-        if(get_bit(switches, 0))
+        if(get_bit(switches[0], 0))
             curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 1L);
         CURLcode err = curl_easy_perform(curl_handle);
         curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_status);
         if(http_status == 200 && err == CURLE_OK) {
             if(json_raw.i > 0 && json_raw.ptr[0] == '{') {
                 struct json_parsed json_parsed;
-                if(parse_json(&json_raw, &json_parsed, get_bit(switches, 0))) {
-                    // Print comic number (must be done)
-                    printf("%s\n", json_parsed.num.ptr);
+                if(parse_json(&json_raw, &json_parsed, get_bit(switches[0], 0))) {
+                    if(get_bit(switches[1], 0))    // Comic number
+                        printf("%s\n", json_parsed.num.ptr);
 
-                    if(get_bit(switches, 1)) {  // Date
+                    if(get_bit(switches[0], 1)) {  // Date
                         printf("%s/%s/%s\n", (json_parsed.day.i == 0) ? "?" : json_parsed.day.ptr
                                            , (json_parsed.month.i == 0) ? "?" : json_parsed.month.ptr
                                            , (json_parsed.year.i == 0) ? "?" : json_parsed.year.ptr);
                     }
 
-                    if(get_bit(switches, 7)) {
-                        if(get_bit(switches, 2))// Safe-title
-                            printf("%s:\n\n", json_parsed.safe_title.ptr);
-                        else                    // Title
-                            printf("%s:\n\n", json_parsed.title.ptr);
+                    if(get_bit(switches[0], 7)) {
+                        if(get_bit(switches[0], 2))// Safe-title
+                            printf("%s:\n", json_parsed.safe_title.ptr);
+                        else                       // Title
+                            printf("%s:\n", json_parsed.title.ptr);
                     }
 
-                    // Transcript
-                    if(get_bit(switches, 6))
-                        printf("%s\n\n", json_parsed.transcript.ptr);
+                    if(get_bit(switches[0], 6))    // Transcript
+                        printf("%s\n", json_parsed.transcript.ptr);
 
-                    if(get_bit(switches, 3))    // Alt text
-                        printf("%s\n\n", json_parsed.alt.ptr);
+                    if(get_bit(switches[0], 3))    // Alt text
+                        printf("%s\n", json_parsed.alt.ptr);
 
-                    if(get_bit(switches, 4))    // Comic strip image link
+                    if(get_bit(switches[0], 4))    // Comic strip image link
                         printf("%s\n", json_parsed.img.ptr);
 
-                    if(get_bit(switches, 5)) {  // Display comic strip to framebuffer
+                    if(get_bit(switches[0], 5)) {  // Display comic strip to framebuffer
                         enum file_ext extension = get_extension(&json_parsed.img); // Check file extension
                         if(extension == FILE_EXT_UNKNOWN) { // Unknown file extension
                             fprintf(stderr, "get_extension@main: The image has an unsupported extension!\n");
@@ -204,7 +262,7 @@ int main(const int argc, const char* argv[]) {
                             curl_easy_setopt(curl_handle, CURLOPT_URL, json_parsed.img.ptr);
                             curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, write_callback_curl);
                             curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, &file_buffer);
-                            if(get_bit(switches, 0))
+                            if(get_bit(switches[0], 0))
                                 curl_easy_setopt(curl_handle, CURLOPT_VERBOSE, 1L);
 
                             // Perform curl action
@@ -249,7 +307,7 @@ int main(const int argc, const char* argv[]) {
                     }
                 }
                 else {
-                    fprintf(stderr, "parse_json@main: Failed to parse JSON!");
+                    fprintf(stderr, "parse_json@main: Failed to parse JSON!\n");
                     exitcode = EXIT_FAILURE;
                 }
 

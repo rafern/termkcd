@@ -21,17 +21,20 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
         fprintf(stderr, "open@draw_to_fb: Could not open framebuffer device /dev/fb0!\nAre you root or part of the framebuffer's group (typically video)?\n");
         return 0;
     }
-    
+   
     struct fb_var_screeninfo var_info; // Framebuffer variable info
+
     if(ioctl(fd, FBIOGET_VSCREENINFO, &var_info) == -1) {
         fprintf(stderr, "ioctl@draw_to_fb: Could not retreive variable framebuffer info!\n");
         return 0;
     }
-    
+
+    struct fb_var_screeninfo restore_info = var_info; // For restoring video mode...
+
     // Force 24-bit bit-depth, with RGB colour
     const int bpp = 4; // BYTES per pixel, not BITS per pixel
-    var_info.bits_per_pixel = bpp * 8;
-    var_info.grayscale = 0;
+    var_info.bits_per_pixel = bpp * 8; // Set bpp to full colour with no alpha
+    var_info.grayscale = 0;            // Set to use colour
     if(ioctl(fd, FBIOPUT_VSCREENINFO, &var_info) == -1) {
         close(fd); // Clean-up
         fprintf(stderr, "ioctl@draw_to_fb: Could not set variable framebuffer info!\n");
@@ -91,8 +94,6 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
     tcsetattr(STDIN_FILENO, TCSANOW, &termio_new);
 
     // Set up variables
-    char* help = "Q: Quit; HJKL: Move comic strip; W: Toggle help";
-    size_t help_len = strlen(help);
     char running = 1;
     char show_help = 1;
 
@@ -105,14 +106,13 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
     const int toolbar_border_thickness = 2;
     const float toolbar_falpha = .75f;
     const float toolbar_falpha_spare = 1.f - toolbar_falpha;
-    const unsigned char toolbar_alpha = 255 * toolbar_falpha;
     const float toolbar_fcolour = .15f;
-    const unsigned char toolbar_colour = 255 * toolbar_fcolour;
     const unsigned char toolbar_colour_backed = toolbar_falpha * toolbar_fcolour * 255;
     const unsigned char toolbar_border_colour = toolbar_colour_backed * 0.75;
     const size_t ll = fix_info.line_length;
     const int xmax = var_info.xres;
     const int ymax = var_info.yres;
+    int top_limit = toolbar_size;
     
     // Set-up offset variables
     int off_x = (xmax - (int)w) / 2;
@@ -169,7 +169,7 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
         if(show_help) {
             // Do the transparent toolbar box
             for(size_t y = 0; y < toolbar_size; ++y) {
-                if(y + 3 >= toolbar_size)
+                if(y + toolbar_border_thickness >= toolbar_size)
                     stride_memset(backbuffer + (y * ll), toolbar_border_colour, 3, xmax, bpp);
                 else { // This should be very expensive as it is alpha blending on CPU, so beware
                     if((y < fb_t) || (y > fb_b)) // Cheaper, non-blending version
@@ -254,15 +254,15 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
                     if((off_y + (int)(h)) < ymax)
                         off_y = ymax - (int)(h);
                 }
-                else if(off_y < toolbar_size)
-                    off_y = toolbar_size;
+                else if(off_y < top_limit)
+                    off_y = top_limit;
                 break;
             case 'j':
             case 'J':
                 off_y += move_speed;
                 if(h > ymax) {
-                    if(off_y > toolbar_size)
-                        off_y = toolbar_size;
+                    if(off_y > top_limit)
+                        off_y = top_limit;
                 }
                 else if((off_y + (int)(h)) > ymax)
                     off_y = ymax - (int)(h);
@@ -272,10 +272,19 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
                 if(show_help) {
                     show_help = 0;
                     // Clear the toolbar's previous area
-                    stride_memset(backbuffer, 0, 3, xmax * toolbar_size, bpp);
+                    stride_memset(backbuffer, 0, 3, xmax * top_limit, bpp);
                 }
                 else
                     show_help = 1;
+                // Update top_limit
+                top_limit = toolbar_size * show_help;
+                // Update Y offset according to top_limit (just like when moving up)
+                if(h > ymax) {
+                    if(off_y > top_limit)
+                        off_y = top_limit;
+                }
+                else if(off_y < top_limit)
+                    off_y = top_limit;
                 wait_for_char = 0;
                 break;
             }
@@ -297,12 +306,19 @@ int draw_to_fb(unsigned char* image_buffer, size_t w, size_t h) {
     // Unmap framebuffer from memory
     munmap(fb_mem, fb_buflen);
 
-    // Close framebuffer device
-    close(fd);
-
     // Clean-up restore memory and backbuffer
     free(fb_mem_old);
     free(backbuffer);
+
+    // Restore variable framebuffer info
+    if(ioctl(fd, FBIOPUT_VSCREENINFO, &restore_info) == -1) {
+        close(fd); // Clean-up
+        fprintf(stderr, "ioctl@draw_to_fb: Could not set restore framebuffer info!\n");
+        return 0;
+    }
+
+    // Close framebuffer device
+    close(fd);
 
     return 1;
 }
