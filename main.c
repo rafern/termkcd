@@ -56,6 +56,10 @@
 //   - Overflow warning now prints to stderr
 //   - Updated help
 //   - Added missing newline in error message
+//  ~~~~~
+//  #4:
+//   Hotfix:
+//   - Fixed long-switch handling (was broken due to malformed strcmp of --help)
 
 // TODO (* have high priority):
 // * Add interactive mode (scroll through comics)
@@ -116,7 +120,7 @@ int main(const int argc, const char* argv[]) {
                 return EXIT_FAILURE;
             }
             else if(this_arg[1] == '-') { // Argument is a long-switch
-                if(strcmp(this_arg, "--help")) {
+                if(strcmp(this_arg, "--help") == 0) {
                     print_help(argv[0]);
                     return EXIT_SUCCESS;
                 }
